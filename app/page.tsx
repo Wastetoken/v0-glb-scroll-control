@@ -62,6 +62,9 @@ export default function ScrollControlPanel() {
   const threeSceneRef = useRef<any>(null)
   const glbModelRef = useRef<any>(null)
   const pathCacheRef = useRef<any>(null)
+  const sortedKeyframesRef = useRef<RotationKeyframe[]>([])
+  const targetProgressRef = useRef(0)
+  const currentProgressRef = useRef(0)
 
   // Convert percentage positions to pixel positions (Three.js uses bottom-left origin)
   const getPixelPositions = useCallback(() => {
@@ -140,7 +143,8 @@ export default function ScrollControlPanel() {
   // Interpolate rotation from keyframes
   const getRotationAtProgress = useCallback(
     (progress: number) => {
-      const sorted = [...pathConfig.rotationKeyframes].sort((a, b) => a.progress - b.progress)
+      const sorted = sortedKeyframesRef.current
+      if (sorted.length === 0) return { x: 0, y: 0, z: 0 }
 
       // Find surrounding keyframes
       let before = sorted[0]
@@ -165,8 +169,13 @@ export default function ScrollControlPanel() {
         z: before.z + (after.z - before.z) * t,
       }
     },
-    [pathConfig.rotationKeyframes],
+    [],
   )
+
+  // Pre-sort rotation keyframes when they change
+  useEffect(() => {
+    sortedKeyframesRef.current = [...pathConfig.rotationKeyframes].sort((a, b) => a.progress - b.progress)
+  }, [pathConfig.rotationKeyframes])
 
   // Precompute path data when config or size changes
   useEffect(() => {
@@ -243,6 +252,7 @@ export default function ScrollControlPanel() {
             if (child.isMesh) {
               child.castShadow = true
               child.receiveShadow = true
+              child.frustumCulled = false // Prevent popping when animating via code
             }
           })
 
@@ -278,6 +288,11 @@ export default function ScrollControlPanel() {
         camera.bottom = height
         camera.updateProjectionMatrix()
         renderer.setSize(width, height)
+        
+        // Rebuild path cache with new dimensions
+        const positions = getPixelPositions()
+        const controlPoints = getAbsoluteControlPoints(positions)
+        pathCacheRef.current = { positions, controlPoints }
       }
       window.addEventListener("resize", handleResize)
 
@@ -308,13 +323,38 @@ export default function ScrollControlPanel() {
       const progress = Math.max(0, Math.min(1, scrolled / scrollHeight))
 
       setScrollProgress(progress)
-      updateModelPosition(progress)
+      targetProgressRef.current = progress // Set target, don't update directly
     }
 
     window.addEventListener("scroll", handleScroll, { passive: true })
     handleScroll() // Initial position
     return () => window.removeEventListener("scroll", handleScroll)
-  }, [pathConfig, modelLoaded])
+  }, [])
+
+  // Smooth animation loop using lerp for AAA motion quality
+  useEffect(() => {
+    if (!modelLoaded) return
+
+    let animationFrameId: number
+
+    const animate = () => {
+      // Lerp toward target progress for smooth motion
+      const current = currentProgressRef.current
+      const target = targetProgressRef.current
+      const newProgress = current + (target - current) * 0.08
+
+      currentProgressRef.current = newProgress
+      updateModelPosition(newProgress)
+
+      animationFrameId = requestAnimationFrame(animate)
+    }
+
+    animationFrameId = requestAnimationFrame(animate)
+
+    return () => {
+      if (animationFrameId) cancelAnimationFrame(animationFrameId)
+    }
+  }, [modelLoaded, updateModelPosition])
 
   const updateModelPosition = useCallback(
     (progress: number) => {
@@ -373,8 +413,24 @@ export default function ScrollControlPanel() {
       gltfLoader.load(
         url,
         (gltf: any) => {
+          // Dispose old model properly
           if (glbModelRef.current?.model) {
-            scene.remove(glbModelRef.current.model)
+            const oldModel = glbModelRef.current.model
+            scene.remove(oldModel)
+            
+            // Dispose geometries and materials to prevent GPU memory leak
+            oldModel.traverse((child: any) => {
+              if (child.isMesh) {
+                if (child.geometry) child.geometry.dispose()
+                if (child.material) {
+                  if (Array.isArray(child.material)) {
+                    child.material.forEach((m: any) => m.dispose())
+                  } else {
+                    child.material.dispose()
+                  }
+                }
+              }
+            })
           }
 
           const model = gltf.scene
@@ -390,6 +446,7 @@ export default function ScrollControlPanel() {
             if (child.isMesh) {
               child.castShadow = true
               child.receiveShadow = true
+              child.frustumCulled = false // Prevent popping when animating via code
             }
           })
 
@@ -398,7 +455,7 @@ export default function ScrollControlPanel() {
           setModelLoaded(true)
 
           // Position at current scroll
-          updateModelPosition(scrollProgress)
+          updateModelPosition(currentProgressRef.current)
 
           URL.revokeObjectURL(url)
         },
@@ -443,7 +500,7 @@ export default function ScrollControlPanel() {
 
 "use client"
 
-import { useEffect, useRef } from "react"
+import { useEffect, useRef, useState } from "react"
 import * as THREE from "three"
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js"
 import { DRACOLoader } from "three/examples/jsm/loaders/DRACOLoader.js"
@@ -460,6 +517,10 @@ export default function ScrollAnimation() {
     renderer: THREE.WebGLRenderer 
   } | null>(null)
   const pathCacheRef = useRef<any>(null)
+  const sortedKeyframesRef = useRef<any[]>([])
+  const targetProgressRef = useRef(0)
+  const currentProgressRef = useRef(0)
+  const [modelLoaded, setModelLoaded] = useState(false)
 
   // Helper: Convert percentage to pixel positions (Three.js bottom-left origin)
   const getPixelPositions = (width: number, height: number) => {
@@ -500,7 +561,8 @@ export default function ScrollAnimation() {
 
   // Helper: Interpolate rotation from keyframes
   const getRotationAtProgress = (progress: number) => {
-    const sorted = [...PATH_CONFIG.rotationKeyframes].sort((a, b) => a.progress - b.progress)
+    const sorted = sortedKeyframesRef.current
+    if (sorted.length === 0) return { x: 0, y: 0, z: 0 }
     
     let before = sorted[0]
     let after = sorted[sorted.length - 1]
@@ -524,6 +586,11 @@ export default function ScrollAnimation() {
       z: before.z + (after.z - before.z) * t,
     }
   }
+
+  // Pre-sort rotation keyframes once
+  useEffect(() => {
+    sortedKeyframesRef.current = [...PATH_CONFIG.rotationKeyframes].sort((a: any, b: any) => a.progress - b.progress)
+  }, [])
 
   useEffect(() => {
     const section = sectionRef.current
@@ -585,11 +652,13 @@ export default function ScrollAnimation() {
         if (child.isMesh) {
           child.castShadow = true
           child.receiveShadow = true
+          child.frustumCulled = false // Prevent popping when animating via code
         }
       })
       
       scene.add(model)
       modelRef.current = { model, baseScale }
+      setModelLoaded(true)
 
       // Initial position
       const positions = getPixelPositions(width, height)
@@ -641,16 +710,39 @@ export default function ScrollAnimation() {
   useEffect(() => {
     const handleScroll = () => {
       const section = sectionRef.current
-      const modelData = modelRef.current
-      const pathCache = pathCacheRef.current
-      if (!section || !modelData || !pathCache) return
-
-      const { model, baseScale } = modelData
-      const { positions, controlPoints } = pathCache
+      if (!section) return
 
       const rect = section.getBoundingClientRect()
       const scrollHeight = section.offsetHeight - window.innerHeight
       const progress = Math.max(0, Math.min(1, -rect.top / scrollHeight))
+
+      targetProgressRef.current = progress // Set target, animation loop handles update
+    }
+
+    window.addEventListener("scroll", handleScroll, { passive: true })
+    handleScroll() // Initial call
+    return () => window.removeEventListener("scroll", handleScroll)
+  }, [])
+
+  // Smooth animation loop using lerp for AAA motion quality
+  useEffect(() => {
+    if (!modelLoaded) return
+
+    let animationFrameId: number
+
+    const animate = () => {
+      const modelData = modelRef.current
+      const pathCache = pathCacheRef.current
+      if (!modelData || !pathCache) return
+
+      const { model, baseScale } = modelData
+      const { positions, controlPoints } = pathCache
+
+      // Lerp toward target progress
+      const current = currentProgressRef.current
+      const target = targetProgressRef.current
+      const progress = current + (target - current) * 0.08
+      currentProgressRef.current = progress
 
       if (positions.length < 2) return
 
@@ -687,12 +779,16 @@ export default function ScrollAnimation() {
       // Apply rotation keyframes
       const rotation = getRotationAtProgress(progress)
       model.rotation.set(rotation.x, rotation.y, rotation.z)
+
+      animationFrameId = requestAnimationFrame(animate)
     }
 
-    window.addEventListener("scroll", handleScroll, { passive: true })
-    handleScroll() // Initial call
-    return () => window.removeEventListener("scroll", handleScroll)
-  }, [])
+    animationFrameId = requestAnimationFrame(animate)
+
+    return () => {
+      if (animationFrameId) cancelAnimationFrame(animationFrameId)
+    }
+  }, [modelLoaded])
 
   return (
     <>
