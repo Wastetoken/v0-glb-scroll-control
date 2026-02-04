@@ -16,11 +16,18 @@ interface ControlPoint {
   z: number
 }
 
+interface RotationKeyframe {
+  progress: number // 0-1, position along path
+  x: number
+  y: number
+  z: number
+}
+
 interface PathConfig {
   controlPoints: ControlPoint[]
   scrollLength: number
   positions: { x: number; y: number; z: number; scale: number }[]
-  rotation: { x: number; y: number; z: number }
+  rotationKeyframes: RotationKeyframe[]
 }
 
 export default function ScrollControlPanel() {
@@ -43,15 +50,19 @@ export default function ScrollControlPanel() {
       { x: 80, y: 50, z: 0, scale: 1.5 },
       { x: 40, y: 85, z: 0, scale: 1 },
     ],
-    rotation: { x: 0, y: 0, z: 0 },
+    rotationKeyframes: [
+      { progress: 0, x: 0, y: 0, z: 0 },
+      { progress: 0.5, x: 0, y: Math.PI, z: 0 },
+      { progress: 1, x: 0, y: Math.PI * 2, z: 0 },
+    ],
   })
 
   const heroSectionRef = useRef<HTMLDivElement>(null)
   const threeContainerRef = useRef<HTMLDivElement>(null)
-  const scrollTriggerRef = useRef<any>(null)
   const threeSceneRef = useRef<any>(null)
   const glbModelRef = useRef<any>(null)
 
+  // Convert percentage positions to pixel positions (Three.js uses bottom-left origin)
   const getPixelPositions = useCallback(() => {
     const section = heroSectionRef.current
     if (!section) return []
@@ -59,7 +70,21 @@ export default function ScrollControlPanel() {
     const height = section.offsetHeight
     return pathConfig.positions.map((pos) => ({
       x: (pos.x / 100) * width,
-      y: (pos.y / 100) * height,
+      y: height - (pos.y / 100) * height, // Flip Y for Three.js
+      z: pos.z,
+      scale: pos.scale,
+    }))
+  }, [pathConfig.positions])
+
+  // Convert percentage positions for SVG (top-left origin)
+  const getSVGPixelPositions = useCallback(() => {
+    const section = heroSectionRef.current
+    if (!section) return []
+    const width = section.offsetWidth
+    const height = section.offsetHeight
+    return pathConfig.positions.map((pos) => ({
+      x: (pos.x / 100) * width,
+      y: (pos.y / 100) * height, // No flip for SVG
       z: pos.z,
       scale: pos.scale,
     }))
@@ -95,7 +120,7 @@ export default function ScrollControlPanel() {
   )
 
   const buildPathString = useCallback(() => {
-    const positions = getPixelPositions()
+    const positions = getSVGPixelPositions()
     const controlPoints = getAbsoluteControlPoints(positions)
     if (positions.length < 2) return ""
 
@@ -109,7 +134,38 @@ export default function ScrollControlPanel() {
       }
     }
     return pathString
-  }, [getPixelPositions, getAbsoluteControlPoints])
+  }, [getSVGPixelPositions, getAbsoluteControlPoints])
+
+  // Interpolate rotation from keyframes
+  const getRotationAtProgress = useCallback(
+    (progress: number) => {
+      const sorted = [...pathConfig.rotationKeyframes].sort((a, b) => a.progress - b.progress)
+
+      // Find surrounding keyframes
+      let before = sorted[0]
+      let after = sorted[sorted.length - 1]
+
+      for (let i = 0; i < sorted.length - 1; i++) {
+        if (progress >= sorted[i].progress && progress <= sorted[i + 1].progress) {
+          before = sorted[i]
+          after = sorted[i + 1]
+          break
+        }
+      }
+
+      if (before.progress === after.progress) {
+        return { x: before.x, y: before.y, z: before.z }
+      }
+
+      const t = (progress - before.progress) / (after.progress - before.progress)
+      return {
+        x: before.x + (after.x - before.x) * t,
+        y: before.y + (after.y - before.y) * t,
+        z: before.z + (after.z - before.z) * t,
+      }
+    },
+    [pathConfig.rotationKeyframes],
+  )
 
   useEffect(() => {
     if (typeof window === "undefined") return
@@ -178,7 +234,7 @@ export default function ScrollControlPanel() {
         },
         undefined,
         (error) => {
-          console.error("[v0] Error loading default model:", error)
+          console.error("Error loading default model:", error)
         },
       )
 
@@ -226,6 +282,7 @@ export default function ScrollControlPanel() {
     }
 
     window.addEventListener("scroll", handleScroll, { passive: true })
+    handleScroll() // Initial position
     return () => window.removeEventListener("scroll", handleScroll)
   }, [pathConfig, modelLoaded])
 
@@ -270,9 +327,12 @@ export default function ScrollControlPanel() {
 
       model.position.set(x, y, z)
       model.scale.setScalar(120 * scale)
-      model.rotation.set(pathConfig.rotation.x, pathConfig.rotation.y, pathConfig.rotation.z)
+
+      // Apply interpolated rotation
+      const rotation = getRotationAtProgress(progress)
+      model.rotation.set(rotation.x, rotation.y, rotation.z)
     },
-    [getPixelPositions, getAbsoluteControlPoints, pathConfig.rotation],
+    [getPixelPositions, getAbsoluteControlPoints, getRotationAtProgress],
   )
 
   useEffect(() => {
@@ -318,7 +378,7 @@ export default function ScrollControlPanel() {
         },
         undefined,
         (error: any) => {
-          console.error("[v0] Error loading GLB:", error)
+          console.error("Error loading GLB:", error)
           URL.revokeObjectURL(url)
         },
       )
@@ -353,10 +413,11 @@ export default function ScrollControlPanel() {
   const exportImplementationCode = () => {
     const code = `// Generated Scroll Animation Implementation
 // Copy this to your Next.js project
+// Required: npm install three @types/three
 
 "use client"
 
-import { useEffect, useRef, useState } from "react"
+import { useEffect, useRef } from "react"
 import * as THREE from "three"
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js"
 
@@ -366,20 +427,91 @@ export default function ScrollAnimation() {
   const containerRef = useRef<HTMLDivElement>(null)
   const sectionRef = useRef<HTMLDivElement>(null)
   const modelRef = useRef<THREE.Object3D | null>(null)
-  const sceneRef = useRef<{ scene: THREE.Scene; camera: THREE.OrthographicCamera; renderer: THREE.WebGLRenderer } | null>(null)
+  const sceneRef = useRef<{ 
+    scene: THREE.Scene
+    camera: THREE.OrthographicCamera
+    renderer: THREE.WebGLRenderer 
+  } | null>(null)
+
+  // Helper: Convert percentage to pixel positions (Three.js bottom-left origin)
+  const getPixelPositions = (width: number, height: number) => {
+    return PATH_CONFIG.positions.map((pos) => ({
+      x: (pos.x / 100) * width,
+      y: height - (pos.y / 100) * height, // Flip Y for Three.js
+      z: pos.z,
+      scale: pos.scale,
+    }))
+  }
+
+  // Helper: Get absolute control points
+  const getAbsoluteControlPoints = (pixelPositions: any[]) => {
+    const cps: any[] = []
+    for (let i = 0; i < pixelPositions.length - 1; i++) {
+      const cp1Idx = i * 2
+      const cp2Idx = i * 2 + 1
+      const anchor1 = pixelPositions[i]
+      const anchor2 = pixelPositions[i + 1]
+
+      if (PATH_CONFIG.controlPoints[cp1Idx]) {
+        cps.push({
+          x: anchor1.x + PATH_CONFIG.controlPoints[cp1Idx].x,
+          y: anchor1.y + PATH_CONFIG.controlPoints[cp1Idx].y,
+          z: PATH_CONFIG.controlPoints[cp1Idx].z,
+        })
+      }
+      if (PATH_CONFIG.controlPoints[cp2Idx]) {
+        cps.push({
+          x: anchor2.x + PATH_CONFIG.controlPoints[cp2Idx].x,
+          y: anchor2.y + PATH_CONFIG.controlPoints[cp2Idx].y,
+          z: PATH_CONFIG.controlPoints[cp2Idx].z,
+        })
+      }
+    }
+    return cps
+  }
+
+  // Helper: Interpolate rotation from keyframes
+  const getRotationAtProgress = (progress: number) => {
+    const sorted = [...PATH_CONFIG.rotationKeyframes].sort((a, b) => a.progress - b.progress)
+    
+    let before = sorted[0]
+    let after = sorted[sorted.length - 1]
+
+    for (let i = 0; i < sorted.length - 1; i++) {
+      if (progress >= sorted[i].progress && progress <= sorted[i + 1].progress) {
+        before = sorted[i]
+        after = sorted[i + 1]
+        break
+      }
+    }
+
+    if (before.progress === after.progress) {
+      return { x: before.x, y: before.y, z: before.z }
+    }
+
+    const t = (progress - before.progress) / (after.progress - before.progress)
+    return {
+      x: before.x + (after.x - before.x) * t,
+      y: before.y + (after.y - before.y) * t,
+      z: before.z + (after.z - before.z) * t,
+    }
+  }
 
   useEffect(() => {
     const section = sectionRef.current
     const container = containerRef.current
     if (!section || !container) return
 
-    // Setup Three.js
+    const width = section.offsetWidth
+    const height = section.offsetHeight
+
+    // Setup Three.js scene
     const scene = new THREE.Scene()
-    const camera = new THREE.OrthographicCamera(0, section.offsetWidth, 0, section.offsetHeight, 1, 2000)
+    const camera = new THREE.OrthographicCamera(0, width, 0, height, 1, 2000)
     camera.position.z = 1000
 
     const renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true })
-    renderer.setSize(section.offsetWidth, section.offsetHeight)
+    renderer.setSize(width, height)
     renderer.setPixelRatio(window.devicePixelRatio)
     renderer.setClearColor(0x000000, 0)
     container.appendChild(renderer.domElement)
@@ -389,10 +521,13 @@ export default function ScrollAnimation() {
     const dirLight = new THREE.DirectionalLight(0xffffff, 1.2)
     dirLight.position.set(200, 400, 300)
     scene.add(dirLight)
+    const backLight = new THREE.DirectionalLight(0x6666ff, 0.5)
+    backLight.position.set(-100, -200, -100)
+    scene.add(backLight)
 
     sceneRef.current = { scene, camera, renderer }
 
-    // Load your GLB model
+    // Load GLB model
     const loader = new GLTFLoader()
     loader.load("${glbUrl || "/path/to/your/model.glb"}", (gltf) => {
       const model = gltf.scene
@@ -400,10 +535,26 @@ export default function ScrollAnimation() {
       const center = box.getCenter(new THREE.Vector3())
       const size = box.getSize(new THREE.Vector3())
       const maxDim = Math.max(size.x, size.y, size.z)
-      model.scale.setScalar(120 / maxDim)
-      model.position.sub(center.multiplyScalar(120 / maxDim))
+      const baseScale = 120 / maxDim
+      
+      model.scale.setScalar(baseScale)
+      model.position.sub(center.multiplyScalar(baseScale))
+      
+      model.traverse((child: any) => {
+        if (child.isMesh) {
+          child.castShadow = true
+          child.receiveShadow = true
+        }
+      })
+      
       scene.add(model)
       modelRef.current = model
+
+      // Initial position
+      const positions = getPixelPositions(width, height)
+      if (positions[0]) {
+        model.position.set(positions[0].x, positions[0].y, 0)
+      }
     })
 
     // Animation loop
@@ -413,8 +564,24 @@ export default function ScrollAnimation() {
     }
     animate()
 
+    // Handle resize
+    const handleResize = () => {
+      const w = section.offsetWidth
+      const h = section.offsetHeight
+      camera.left = 0
+      camera.right = w
+      camera.top = 0
+      camera.bottom = h
+      camera.updateProjectionMatrix()
+      renderer.setSize(w, h)
+    }
+    window.addEventListener("resize", handleResize)
+
     // Cleanup
-    return () => renderer.dispose()
+    return () => {
+      window.removeEventListener("resize", handleResize)
+      renderer.dispose()
+    }
   }, [])
 
   useEffect(() => {
@@ -430,58 +597,71 @@ export default function ScrollAnimation() {
       // Calculate position along bezier curve
       const width = section.offsetWidth
       const height = section.offsetHeight
-      
-      const positions = PATH_CONFIG.positions.map(p => ({
-        x: (p.x / 100) * width,
-        y: (p.y / 100) * height,
-        z: p.z,
-        scale: p.scale
-      }))
+      const positions = getPixelPositions(width, height)
+      const controlPoints = getAbsoluteControlPoints(positions)
 
-      const controlPoints: { x: number; y: number; z: number }[] = []
-      for (let i = 0; i < positions.length - 1; i++) {
-        const cp1 = PATH_CONFIG.controlPoints[i * 2]
-        const cp2 = PATH_CONFIG.controlPoints[i * 2 + 1]
-        controlPoints.push({ x: positions[i].x + cp1.x, y: positions[i].y + cp1.y, z: cp1.z })
-        controlPoints.push({ x: positions[i + 1].x + cp2.x, y: positions[i + 1].y + cp2.y, z: cp2.z })
-      }
+      if (positions.length < 2) return
 
       const numSegments = positions.length - 1
       const segmentProgress = progress * numSegments
       const currentSegment = Math.min(Math.floor(segmentProgress), numSegments - 1)
       const t = segmentProgress - currentSegment
 
+      const cp1Idx = currentSegment * 2
+      const cp2Idx = currentSegment * 2 + 1
+
+      if (!controlPoints[cp1Idx] || !controlPoints[cp2Idx]) return
+
       const p0 = positions[currentSegment]
-      const p1 = controlPoints[currentSegment * 2]
-      const p2 = controlPoints[currentSegment * 2 + 1]
+      const p1 = controlPoints[cp1Idx]
+      const p2 = controlPoints[cp2Idx]
       const p3 = positions[currentSegment + 1]
 
+      // Cubic bezier interpolation
       const mt = 1 - t
-      const x = mt*mt*mt * p0.x + 3*mt*mt*t * p1.x + 3*mt*t*t * p2.x + t*t*t * p3.x
-      const y = mt*mt*mt * p0.y + 3*mt*mt*t * p1.y + 3*mt*t*t * p2.y + t*t*t * p3.y
-      const z = mt*mt*mt * p0.z + 3*mt*mt*t * p1.z + 3*mt*t*t * p2.z + t*t*t * p3.z
+      const mt2 = mt * mt
+      const mt3 = mt2 * mt
+      const t2 = t * t
+      const t3 = t2 * t
+
+      const x = mt3 * p0.x + 3 * mt2 * t * p1.x + 3 * mt * t2 * p2.x + t3 * p3.x
+      const y = mt3 * p0.y + 3 * mt2 * t * p1.y + 3 * mt * t2 * p2.y + t3 * p3.y
+      const z = mt3 * p0.z + 3 * mt2 * t * p1.z + 3 * mt * t2 * p2.z + t3 * p3.z
       const scale = p0.scale + (p3.scale - p0.scale) * t
 
       model.position.set(x, y, z)
       model.scale.setScalar(120 * scale)
-      model.rotation.set(${pathConfig.rotation.x}, ${pathConfig.rotation.y}, ${pathConfig.rotation.z})
+
+      // Apply rotation keyframes
+      const rotation = getRotationAtProgress(progress)
+      model.rotation.set(rotation.x, rotation.y, rotation.z)
     }
 
     window.addEventListener("scroll", handleScroll, { passive: true })
+    handleScroll() // Initial call
     return () => window.removeEventListener("scroll", handleScroll)
   }, [])
 
   return (
     <>
-      <div ref={sectionRef} style={{ height: "${pathConfig.scrollLength}px", position: "relative" }}>
+      <div 
+        ref={sectionRef} 
+        style={{ height: "${pathConfig.scrollLength}px", position: "relative" }}
+      >
         {/* Your page content goes here */}
       </div>
-      <div ref={containerRef} style={{ position: "fixed", inset: 0, pointerEvents: "none", zIndex: 10 }} />
+      <div 
+        ref={containerRef} 
+        style={{ 
+          position: "fixed", 
+          inset: 0, 
+          pointerEvents: "none", 
+          zIndex: 10 
+        }} 
+      />
     </>
   )
 }
-
-// Required packages: three, @types/three
 `
 
     const blob = new Blob([code], { type: "text/plain" })
@@ -523,10 +703,34 @@ export default function ScrollAnimation() {
     }))
   }
 
-  const updateRotation = (axis: "x" | "y" | "z", value: number) => {
+  const updateRotationKeyframe = (index: number, axis: "x" | "y" | "z" | "progress", value: number) => {
     setPathConfig((prev) => ({
       ...prev,
-      rotation: { ...prev.rotation, [axis]: (value * Math.PI) / 180 },
+      rotationKeyframes: prev.rotationKeyframes.map((kf, idx) => (idx === index ? { ...kf, [axis]: value } : kf)),
+    }))
+  }
+
+  const addRotationKeyframe = () => {
+    const lastKf = pathConfig.rotationKeyframes[pathConfig.rotationKeyframes.length - 1]
+    setPathConfig((prev) => ({
+      ...prev,
+      rotationKeyframes: [
+        ...prev.rotationKeyframes,
+        {
+          progress: Math.min(lastKf.progress + 0.2, 1),
+          x: 0,
+          y: 0,
+          z: 0,
+        },
+      ].sort((a, b) => a.progress - b.progress),
+    }))
+  }
+
+  const removeRotationKeyframe = (index: number) => {
+    if (pathConfig.rotationKeyframes.length <= 2) return
+    setPathConfig((prev) => ({
+      ...prev,
+      rotationKeyframes: prev.rotationKeyframes.filter((_, idx) => idx !== index),
     }))
   }
 
@@ -578,22 +782,27 @@ export default function ScrollAnimation() {
         { x: 80, y: 50, z: 0, scale: 1.5 },
         { x: 40, y: 85, z: 0, scale: 1 },
       ],
-      rotation: { x: 0, y: 0, z: 0 },
+      rotationKeyframes: [
+        { progress: 0, x: 0, y: 0, z: 0 },
+        { progress: 0.5, x: 0, y: Math.PI, z: 0 },
+        { progress: 1, x: 0, y: Math.PI * 2, z: 0 },
+      ],
     })
   }
 
-  const pixelPositions = getPixelPositions()
-  const absoluteControlPoints = getAbsoluteControlPoints(pixelPositions)
+  const svgPositions = getSVGPixelPositions()
+  const svgControlPoints = getAbsoluteControlPoints(svgPositions)
 
   return (
     <div className="relative min-h-screen bg-neutral-950">
       {/* Hero Section */}
       <div className="h-screen flex flex-col items-center justify-center px-4 bg-gradient-to-b from-neutral-900 to-neutral-950">
         <h1 className="text-2xl sm:text-4xl md:text-5xl font-bold text-center mb-4 text-white text-balance">
-          3D Scroll Path Designer
+          3D Scroll Path Designer Pro
         </h1>
         <p className="text-sm sm:text-base text-neutral-400 text-center max-w-xl mb-8 px-4">
-          Design scroll animations visually. Export clean code for your website.
+          Professional-grade scroll animation designer with rotation keyframes, accurate coordinate systems, and
+          production-ready code export.
         </p>
         <div className="flex items-center gap-2 text-neutral-500">
           <ChevronDown className="w-5 h-5 animate-bounce" />
@@ -627,10 +836,10 @@ export default function ScrollAnimation() {
         {showPath && (
           <svg className="absolute inset-0 w-full h-full pointer-events-none" style={{ zIndex: 15 }}>
             {/* Handle lines from anchors to control points */}
-            {absoluteControlPoints.map((cp, idx) => {
+            {svgControlPoints.map((cp, idx) => {
               const segmentIdx = Math.floor(idx / 2)
               const isFirstCP = idx % 2 === 0
-              const anchor = pixelPositions[isFirstCP ? segmentIdx : segmentIdx + 1]
+              const anchor = svgPositions[isFirstCP ? segmentIdx : segmentIdx + 1]
               if (!anchor) return null
               return (
                 <line
@@ -651,7 +860,7 @@ export default function ScrollAnimation() {
             <path d={buildPathString()} stroke="#f43f5e" strokeWidth="3" fill="none" opacity="0.9" />
 
             {/* Control point circles */}
-            {absoluteControlPoints.map((cp, idx) => (
+            {svgControlPoints.map((cp, idx) => (
               <g key={`cp-${idx}`}>
                 <circle cx={cp.x} cy={cp.y} r="8" fill="#22c55e" stroke="white" strokeWidth="2" />
                 <text x={cp.x + 12} y={cp.y - 8} fill="#22c55e" fontSize="11" fontWeight="bold">
@@ -661,7 +870,7 @@ export default function ScrollAnimation() {
             ))}
 
             {/* Anchor point circles */}
-            {pixelPositions.map((pos, idx) => (
+            {svgPositions.map((pos, idx) => (
               <g key={`anchor-${idx}`}>
                 <circle cx={pos.x} cy={pos.y} r="10" fill="#f43f5e" stroke="white" strokeWidth="2" />
                 <text x={pos.x + 14} y={pos.y - 10} fill="#f43f5e" fontSize="12" fontWeight="bold">
@@ -692,7 +901,7 @@ export default function ScrollAnimation() {
       >
         <div className="p-3">
           <div className="flex items-center justify-between mb-2">
-            <h2 className="text-sm font-bold text-white">{minimized ? "Controls" : "Path Designer"}</h2>
+            <h2 className="text-sm font-bold text-white">{minimized ? "Controls" : "Path Designer Pro"}</h2>
             <Button
               variant="ghost"
               size="icon"
@@ -801,7 +1010,7 @@ export default function ScrollAnimation() {
                     Curves
                   </TabsTrigger>
                   <TabsTrigger value="rotation" className="text-xs data-[state=active]:bg-neutral-700">
-                    Rotate
+                    Rotation
                   </TabsTrigger>
                 </TabsList>
 
@@ -902,28 +1111,68 @@ export default function ScrollAnimation() {
                   ))}
                 </TabsContent>
 
-                <TabsContent value="rotation" className="mt-2">
-                  <Card className="p-2 bg-neutral-800 border-neutral-700">
-                    <Label className="text-xs font-semibold mb-2 block text-neutral-300">Model Rotation</Label>
-                    <div className="space-y-2">
-                      {(["x", "y", "z"] as const).map((axis) => (
-                        <div key={axis} className="flex gap-2 items-center">
-                          <Label className="text-xs w-6 text-neutral-400 uppercase">{axis}</Label>
-                          <Slider
-                            value={[(pathConfig.rotation[axis] * 180) / Math.PI]}
-                            onValueChange={(v) => updateRotation(axis, v[0])}
-                            min={-180}
-                            max={180}
-                            step={5}
-                            className="flex-1"
-                          />
-                          <span className="text-xs w-10 text-neutral-400">
-                            {Math.round((pathConfig.rotation[axis] * 180) / Math.PI)}°
-                          </span>
+                <TabsContent value="rotation" className="space-y-2 mt-2 max-h-64 overflow-y-auto">
+                  <Button
+                    onClick={addRotationKeyframe}
+                    variant="outline"
+                    size="sm"
+                    className="w-full text-xs h-8 bg-blue-900/50 border-blue-700 text-blue-400 hover:bg-blue-800/50"
+                  >
+                    <Plus className="mr-1 h-3 w-3" />
+                    Add Rotation Keyframe
+                  </Button>
+
+                  {pathConfig.rotationKeyframes
+                    .sort((a, b) => a.progress - b.progress)
+                    .map((kf, idx) => (
+                      <Card key={idx} className="p-2 bg-neutral-800 border-neutral-700">
+                        <div className="flex items-center justify-between mb-2">
+                          <Label className="text-xs font-semibold text-blue-400">
+                            Keyframe {idx + 1} ({(kf.progress * 100).toFixed(0)}%)
+                          </Label>
+                          {pathConfig.rotationKeyframes.length > 2 && (
+                            <Button
+                              onClick={() => removeRotationKeyframe(idx)}
+                              variant="ghost"
+                              size="icon"
+                              className="h-5 w-5 text-neutral-500 hover:text-red-400"
+                            >
+                              <Trash2 className="h-3 w-3" />
+                            </Button>
+                          )}
                         </div>
-                      ))}
-                    </div>
-                  </Card>
+                        <div className="space-y-1.5">
+                          <div className="flex gap-2 items-center">
+                            <Label className="text-xs w-6 text-neutral-400">POS</Label>
+                            <Slider
+                              value={[kf.progress * 100]}
+                              onValueChange={(v) => updateRotationKeyframe(idx, "progress", v[0] / 100)}
+                              min={0}
+                              max={100}
+                              step={1}
+                              className="flex-1"
+                            />
+                            <span className="text-xs w-10 text-neutral-400">{(kf.progress * 100).toFixed(0)}%</span>
+                          </div>
+                          {(["x", "y", "z"] as const).map((axis) => (
+                            <div key={axis} className="flex gap-2 items-center">
+                              <Label className="text-xs w-6 text-neutral-400 uppercase">{axis}</Label>
+                              <Slider
+                                value={[(kf[axis] * 180) / Math.PI]}
+                                onValueChange={(v) => updateRotationKeyframe(idx, axis, (v[0] * Math.PI) / 180)}
+                                min={-360}
+                                max={360}
+                                step={5}
+                                className="flex-1"
+                              />
+                              <span className="text-xs w-10 text-neutral-400">
+                                {Math.round((kf[axis] * 180) / Math.PI)}°
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      </Card>
+                    ))}
                 </TabsContent>
               </Tabs>
             </div>
