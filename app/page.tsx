@@ -173,6 +173,7 @@ export default function ScrollControlPanel() {
     const initScene = async () => {
       const THREE = await import("three")
       const { GLTFLoader } = await import("three/examples/jsm/loaders/GLTFLoader.js")
+      const { DRACOLoader } = await import("three/examples/jsm/loaders/DRACOLoader.js")
 
       const section = heroSectionRef.current
       const threeContainer = threeContainerRef.current
@@ -199,9 +200,15 @@ export default function ScrollControlPanel() {
       backLight.position.set(-100, -200, -100)
       scene.add(backLight)
 
-      threeSceneRef.current = { scene, camera, renderer, THREE, GLTFLoader }
+      threeSceneRef.current = { scene, camera, renderer, THREE, GLTFLoader, DRACOLoader }
+
+      // Setup DRACO loader for compressed models
+      const dracoLoader = new DRACOLoader()
+      dracoLoader.setDecoderPath("https://www.gstatic.com/draco/versioned/decoders/1.5.6/")
+      dracoLoader.setDecoderConfig({ type: "js" })
 
       const loader = new GLTFLoader()
+      loader.setDRACOLoader(dracoLoader)
       loader.load(
         "/assets/3d/duck.glb",
         (gltf) => {
@@ -339,8 +346,16 @@ export default function ScrollControlPanel() {
     if (!glbFile || !threeSceneRef.current) return
 
     const loadModel = async () => {
-      const { scene, GLTFLoader, THREE } = threeSceneRef.current
+      const { scene, GLTFLoader, DRACOLoader, THREE } = threeSceneRef.current
+      
+      // Setup DRACO loader for compressed models
+      const dracoLoader = new DRACOLoader()
+      dracoLoader.setDecoderPath("https://www.gstatic.com/draco/versioned/decoders/1.5.6/")
+      dracoLoader.setDecoderConfig({ type: "js" })
+
       const loader = new GLTFLoader()
+      loader.setDRACOLoader(dracoLoader)
+      
       const url = URL.createObjectURL(glbFile)
 
       loader.load(
@@ -420,6 +435,7 @@ export default function ScrollControlPanel() {
 import { useEffect, useRef } from "react"
 import * as THREE from "three"
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js"
+import { DRACOLoader } from "three/examples/jsm/loaders/DRACOLoader.js"
 
 const PATH_CONFIG = ${JSON.stringify(pathConfig, null, 2)}
 
@@ -527,8 +543,14 @@ export default function ScrollAnimation() {
 
     sceneRef.current = { scene, camera, renderer }
 
+    // Setup DRACO loader for compressed GLB files
+    const dracoLoader = new DRACOLoader()
+    dracoLoader.setDecoderPath("https://www.gstatic.com/draco/versioned/decoders/1.5.6/")
+    dracoLoader.setDecoderConfig({ type: "js" })
+
     // Load GLB model
     const loader = new GLTFLoader()
+    loader.setDRACOLoader(dracoLoader)
     loader.load("${glbUrl || "/path/to/your/model.glb"}", (gltf) => {
       const model = gltf.scene
       const box = new THREE.Box3().setFromObject(model)
@@ -581,6 +603,7 @@ export default function ScrollAnimation() {
     return () => {
       window.removeEventListener("resize", handleResize)
       renderer.dispose()
+      dracoLoader.dispose()
     }
   }, [])
 
