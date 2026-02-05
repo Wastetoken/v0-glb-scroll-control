@@ -172,6 +172,54 @@ export default function ScrollControlPanel() {
     [],
   )
 
+  // CRITICAL: Define updateModelPosition BEFORE any useEffect that uses it
+  const updateModelPosition = useCallback(
+    (progress: number) => {
+      if (!glbModelRef.current || !threeSceneRef.current || !pathCacheRef.current) return
+
+      const { model, baseScale } = glbModelRef.current
+      const { positions, controlPoints } = pathCacheRef.current
+
+      if (positions.length < 2) return
+
+      const numSegments = positions.length - 1
+      const segmentProgress = progress * numSegments
+      const currentSegment = Math.min(Math.floor(segmentProgress), numSegments - 1)
+      const t = segmentProgress - currentSegment
+
+      const cp1Idx = currentSegment * 2
+      const cp2Idx = currentSegment * 2 + 1
+
+      if (!controlPoints[cp1Idx] || !controlPoints[cp2Idx]) return
+
+      const p0 = positions[currentSegment]
+      const p1 = controlPoints[cp1Idx]
+      const p2 = controlPoints[cp2Idx]
+      const p3 = positions[currentSegment + 1]
+
+      // Cubic bezier formula
+      const mt = 1 - t
+      const mt2 = mt * mt
+      const mt3 = mt2 * mt
+      const t2 = t * t
+      const t3 = t2 * t
+
+      const x = mt3 * p0.x + 3 * mt2 * t * p1.x + 3 * mt * t2 * p2.x + t3 * p3.x
+      const y = mt3 * p0.y + 3 * mt2 * t * p1.y + 3 * mt * t2 * p2.y + t3 * p3.y
+      const z = mt3 * p0.z + 3 * mt2 * t * p1.z + 3 * mt * t2 * p2.z + t3 * p3.z
+
+      const scale = p0.scale + (p3.scale - p0.scale) * t
+
+      model.position.set(x, y, z)
+      model.scale.setScalar(baseScale * scale) // Preserve base scale
+
+      // Apply interpolated rotation
+      const rotation = getRotationAtProgress(progress)
+      model.rotation.set(rotation.x, rotation.y, rotation.z)
+    },
+    [getRotationAtProgress],
+  )
+
   // Pre-sort rotation keyframes when they change
   useEffect(() => {
     sortedKeyframesRef.current = [...pathConfig.rotationKeyframes].sort((a, b) => a.progress - b.progress)
@@ -308,7 +356,7 @@ export default function ScrollControlPanel() {
     return () => {
       cleanup?.()
     }
-  }, [])
+  }, [getPixelPositions, getAbsoluteControlPoints])
 
   useEffect(() => {
     if (typeof window === "undefined") return
@@ -355,53 +403,6 @@ export default function ScrollControlPanel() {
       if (animationFrameId) cancelAnimationFrame(animationFrameId)
     }
   }, [modelLoaded, updateModelPosition])
-
-  const updateModelPosition = useCallback(
-    (progress: number) => {
-      if (!glbModelRef.current || !threeSceneRef.current || !pathCacheRef.current) return
-
-      const { model, baseScale } = glbModelRef.current
-      const { positions, controlPoints } = pathCacheRef.current
-
-      if (positions.length < 2) return
-
-      const numSegments = positions.length - 1
-      const segmentProgress = progress * numSegments
-      const currentSegment = Math.min(Math.floor(segmentProgress), numSegments - 1)
-      const t = segmentProgress - currentSegment
-
-      const cp1Idx = currentSegment * 2
-      const cp2Idx = currentSegment * 2 + 1
-
-      if (!controlPoints[cp1Idx] || !controlPoints[cp2Idx]) return
-
-      const p0 = positions[currentSegment]
-      const p1 = controlPoints[cp1Idx]
-      const p2 = controlPoints[cp2Idx]
-      const p3 = positions[currentSegment + 1]
-
-      // Cubic bezier formula
-      const mt = 1 - t
-      const mt2 = mt * mt
-      const mt3 = mt2 * mt
-      const t2 = t * t
-      const t3 = t2 * t
-
-      const x = mt3 * p0.x + 3 * mt2 * t * p1.x + 3 * mt * t2 * p2.x + t3 * p3.x
-      const y = mt3 * p0.y + 3 * mt2 * t * p1.y + 3 * mt * t2 * p2.y + t3 * p3.y
-      const z = mt3 * p0.z + 3 * mt2 * t * p1.z + 3 * mt * t2 * p2.z + t3 * p3.z
-
-      const scale = p0.scale + (p3.scale - p0.scale) * t
-
-      model.position.set(x, y, z)
-      model.scale.setScalar(baseScale * scale) // Preserve base scale
-
-      // Apply interpolated rotation
-      const rotation = getRotationAtProgress(progress)
-      model.rotation.set(rotation.x, rotation.y, rotation.z)
-    },
-    [getRotationAtProgress],
-  )
 
   useEffect(() => {
     if (!glbFile || !threeSceneRef.current) return
@@ -468,7 +469,7 @@ export default function ScrollControlPanel() {
     }
 
     loadModel()
-  }, [glbFile, updateModelPosition, scrollProgress])
+  }, [glbFile, updateModelPosition])
 
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
